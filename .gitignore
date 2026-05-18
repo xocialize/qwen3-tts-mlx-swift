@@ -1,0 +1,13 @@
+.build/
+.swiftpm/
+DerivedData/
+*.xcodeproj/xcuserdata/
+*.profraw
+.DS_Store
+**/.DS_Store
+*.xcuserstate
+xcuserdata/
+**/xcuserdata/
+xcschememanagement.plist
+.claude/
+Package.resolved
