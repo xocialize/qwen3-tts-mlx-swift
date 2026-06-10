@@ -1,0 +1,17 @@
+Qwen3-TTS for MLX-Swift
+Copyright 2026 Xocialize
+
+The Qwen3TTS and AudioCommon targets are derived from speech-swift
+(https://github.com/soniqo/speech-swift, formerly ivan-digital/qwen3-asr-swift),
+licensed under the Apache License, Version 2.0.
+
+Substantial modifications by Xocialize include: full-precision (bfloat16) weight
+support alongside quantized weights (FlexibleLinear), symmetric trimming in
+CausalTransposeConv1d, decode-length padding fixes, non-streaming text prefill,
+tonal tail trimming, seed-once sampling fixes, a fresh SpeechTokenizerEncoder
+implementation, and the Qwen3TTSCloning target (ICL voice cloning), which is
+original work by Xocialize.
+
+The Qwen3-TTS model weights are published separately by Alibaba/Qwen and the
+mlx-community under the Apache License, Version 2.0; this repository contains
+no model weights.

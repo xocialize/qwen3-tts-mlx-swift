@@ -1920,16 +1920,23 @@ public extension Qwen3TTSModel {
             }
         }
 
-        // Download tokenizer/codec weights
-        let tokenizerCacheDir = try HuggingFaceDownloader.getCacheDirectory(for: tokenizerModelId)
-        if !HuggingFaceDownloader.weightsExist(in: tokenizerCacheDir) {
-            progressHandler?(0.4, "Downloading speech tokenizer...")
-            try await HuggingFaceDownloader.downloadWeights(
-                modelId: tokenizerModelId,
-                to: tokenizerCacheDir,
-                progressHandler: { progress in
-                    progressHandler?(0.4 + progress * 0.2, "Downloading speech tokenizer...")
-                })
+        // Resolve tokenizer/codec directory — local path or HuggingFace cache
+        let tokenizerCacheDir: URL
+        let localTokenizerURL = URL(fileURLWithPath: tokenizerModelId)
+        if HuggingFaceDownloader.weightsExist(in: localTokenizerURL) {
+            tokenizerCacheDir = localTokenizerURL
+            progressHandler?(0.4, "Using local speech tokenizer at \(tokenizerModelId)")
+        } else {
+            tokenizerCacheDir = try HuggingFaceDownloader.getCacheDirectory(for: tokenizerModelId)
+            if !HuggingFaceDownloader.weightsExist(in: tokenizerCacheDir) {
+                progressHandler?(0.4, "Downloading speech tokenizer...")
+                try await HuggingFaceDownloader.downloadWeights(
+                    modelId: tokenizerModelId,
+                    to: tokenizerCacheDir,
+                    progressHandler: { progress in
+                        progressHandler?(0.4 + progress * 0.2, "Downloading speech tokenizer...")
+                    })
+            }
         }
 
         // Load config dynamically from config.json (dimensions, model type, tokens, speakers)
