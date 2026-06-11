@@ -734,21 +734,27 @@ public class SpeechTokenizerDecoder: Module {
     }
 
     /// Convert codes to float audio samples using chunked decoding + bulk extraction.
-    /// Trims output to valid length based on non-zero tokens in the first codebook.
+    /// Trims output to the valid (non-padding) frame count of the first codebook.
     ///
-    /// **IMPORTANT — Uses `> 0` (not `> -1`) matching the HF Spaces fix.**
-    /// The original Qwen3-TTS repo used `(codes[..., 0] > -1).sum()` which counts
-    /// zero-valued padding codes as valid, producing extra decoded frames that manifest
-    /// as tonal noise at the audio tail. The HF Spaces demo corrected this to
-    /// `(codes[..., 0] > 0).sum()` to exclude padding. Do NOT change `> 0` to `> -1`.
+    /// **Padding semantics — upstream's final fix (QwenLM/Qwen3-TTS, 2026-02-06):**
+    /// padding is `-1`; **zero is a legitimate codebook token**. Valid length is
+    /// `(codes[..., 0] > -1).sum()` computed BEFORE clamping, then codes are clamped to
+    /// `min 0` so any padding decodes as a safe embedding index, and the decoded audio is
+    /// trimmed to the counted length. The earlier HF-Spaces-style `> 0` count (previously
+    /// used here) miscounted legitimate zero-valued codes as padding, silently trimming
+    /// ~80 ms (1920 samples) off the END of the audio per zero code — intermittent
+    /// last-words-swallowed truncation (upstream issue #181). Our pipeline trims at EOS
+    /// before decode (codes are never padded), so the count equals the full frame count;
+    /// the clamp + trim remain for upstream parity and safety on padded inputs.
+    /// Tail tonal-hum artifacts are handled separately by `trimTonalTail()` in Qwen3TTS.
     public func decode(codes: MLXArray) -> [Float] {
-        // Decode first, then compute valid length (HF Spaces order — decode before trim)
-        let waveform = chunkedDecode(codes: codes)
-
-        // Trim to valid length: count non-zero tokens in first codebook (> 0, not > -1)
+        // Valid length BEFORE clamping (upstream order): exclude -1 padding, keep zero codes.
         let firstCodebook = codes[0..., 0, 0...]  // [B, T] — first codebook across all timesteps
-        let validFrames = Int((firstCodebook .> MLXArray(Int32(0))).sum().item(Int.self))
+        let validFrames = Int((firstCodebook .> MLXArray(Int32(-1))).sum().item(Int.self))
         let validSamples = validFrames * 1920  // decode_upsample_rate = 1920
+
+        let clamped = MLX.maximum(codes, MLXArray(Int32(0)))
+        let waveform = chunkedDecode(codes: clamped)
 
         let flat = waveform.squeezed()
         eval(flat)

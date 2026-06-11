@@ -50,7 +50,7 @@ let audios = model.synthesizeBatch(texts: ["Hello", "World"], language: "english
 **Key types:**
 - `TTSModelVariant` — `.base` (aufklarer 4-bit) or `.customVoice` (mlx-community 4-bit)
 - `Qwen3TTSConfig` — `talker` + `codePredictor` + `speechTokenizerDecoder` configs. Preset: `.base06B`
-- `SamplingConfig` — `temperature` (1.0), `topK` (50), `maxTokens` (500), `repetitionPenalty` (1.05)
+- `SamplingConfig` — `temperature` (0.5), `topK` (50), `maxTokens` (4096 — a safety cap, NOT a length control; let natural EOS terminate, see below), `repetitionPenalty` (1.05), `eosLogitBias` (0.0 — the demo uses no bias; positive values risk cutting speech)
 - `StreamingConfig` — `firstChunkFrames`, `chunkFrames`, `decoderLeftContext`. Presets: `.default`, `.lowLatency`
 - `SpeakerConfig` — preset speaker IDs and dialect mappings (CustomVoice models only)
 - `CodecTokens` — special token constants (BOS, EOS, language IDs)
@@ -127,8 +127,8 @@ These changes differ from the original Qwen3-TTS Python repo (`Qwen3-TTS-main/`)
 ### CausalTransposeConv1d symmetric trimming (`SpeechTokenizerDecoder.swift`)
 The original Python `CausalTransConvNet` uses right-only trimming (`left_pad=0, right_pad=pad`). The HF Spaces version corrects this to symmetric trimming (`left_pad=ceil(pad), right_pad=pad-left_pad`). Without this fix, zero-padding artifacts from the transposed convolution accumulate and produce faint tonal hum (~67 Hz / ~540 Hz) at the tail of generated audio.
 
-### Decode length uses `> 0` not `> -1` (`SpeechTokenizerDecoder.swift`)
-The original Python `decode()` counted valid frames with `(codes[..., 0] > -1).sum()`, which includes zero-valued padding tokens as valid. The HF Spaces version uses `> 0`, excluding padding. This prevents extra decoded frames from becoming tonal noise at the end of audio output.
+### Decode length uses `> -1` + clamp — upstream's final semantics (`SpeechTokenizerDecoder.swift`)
+**Superseded divergence (fixed 2026-06-10).** We previously counted valid frames with `> 0` per the HF Spaces demo, believing zero-valued codes were padding. Upstream's final fix (QwenLM/Qwen3-TTS commit of 2026-02-06, "padding value process bug in tokenizer decode") settled the real semantics: **padding is `-1`; zero is a legitimate codebook token.** The `> 0` count silently trimmed ~80 ms off the END of the audio for every legitimate zero-valued codebook-0 frame (~20% of 500-frame generations affected) — intermittent last-words-swallowed truncation, matching upstream issue #181 and our live-run finding. Current implementation: count `(codes[..., 0] > -1)` BEFORE clamping, `clamp(min: 0)`, decode, trim to the counted length. Tail tonal hum (the thing `> 0` accidentally helped with) is handled by `trimTonalTail()`.
 
 ### Full-precision weight support (`FlexibleLinear.swift`, `Configuration.swift`, `Talker.swift`, `CodePredictor.swift`)
 The original fork only supported 4-bit quantized weights. We added `FlexibleLinear`/`FlexibleMLP` wrapper classes that auto-detect quantization from `config.json` and support both 4-bit and full-precision (bfloat16) weights. The 4-bit quantization was found to cause garbled audio and runaway generation on MLX — full-precision models produce clean output matching the Python reference.

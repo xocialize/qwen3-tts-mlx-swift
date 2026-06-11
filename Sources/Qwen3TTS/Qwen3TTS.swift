@@ -636,7 +636,6 @@ public class Qwen3TTSModel {
         samplesPerFrame: Int
     ) -> [Float] {
         let contextStart = max(chunkStart - decoderLeftContext, 0)
-        let actualContext = chunkStart - contextStart
 
         // Build [1, 16, contextFrames + chunkFrames] from accumulated codebooks
         let numGroups = allCodebooks.count
