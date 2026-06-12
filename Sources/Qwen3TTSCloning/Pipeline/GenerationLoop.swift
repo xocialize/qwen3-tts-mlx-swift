@@ -100,6 +100,7 @@ enum GenerationLoop {
 
         // --- Autoregressive generation ---
         for iterIdx in 1..<safeMaxTokens {
+            if Task.isCancelled { break }  // E3: cooperative cancellation (C13)
             // Text side: next trailing text embed or tts_pad
             let textEmbed: MLXArray
             let trailingLen = trailingTextHidden.dim(1)

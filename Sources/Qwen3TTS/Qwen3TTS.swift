@@ -302,11 +302,33 @@ public class Qwen3TTSModel {
         var cloneSampling = sampling
         cloneSampling.repetitionPenalty = max(sampling.repetitionPenalty, 1.5)
 
-        let (allCodebooks, numFrames) = generateWithCodePredictor(
-            prefillEmbeds: prefillEmbeds,
-            trailingTextHidden: trailingTextHidden,
-            ttsPadEmbed: ttsPadEmbed,
-            sampling: cloneSampling)
+        // E1/E3 (EXTERNAL-RESOLVE): the clone path previously had NO text-proportional
+        // cap (only the 1500 hard ceiling ≈ 2 min), and ~1-in-10 sampled trajectories
+        // miss EOS entirely (measured: 9/10 stop at 38–83 frames for a ~4 s sentence,
+        // 1/10 runs to the cap). Bound the damage with a text-proportional ceiling
+        // (×8 frames/token, 150 floor ≈ 12 s — roomy for dramatic delivery), and
+        // RETRY with fresh RNG when the cap is hit without EOS: p(runaway)≈0.1 →
+        // ≈1e-3 after two retries.
+        let textContentTokens = max(textTokens.count - 8, 1)  // subtract ChatML overhead
+        let cloneCap = max(150, textContentTokens * 8)
+        cloneSampling.maxTokens = min(cloneSampling.maxTokens, cloneCap)
+
+        var allCodebooks = MLXArray.zeros([1, 16, 0])
+        var numFrames = 0
+        let maxAttempts = 3
+        for attempt in 1...maxAttempts {
+            (allCodebooks, numFrames) = generateWithCodePredictor(
+                prefillEmbeds: prefillEmbeds,
+                trailingTextHidden: trailingTextHidden,
+                ttsPadEmbed: ttsPadEmbed,
+                sampling: cloneSampling)
+            let hitCap = numFrames >= cloneSampling.maxTokens
+            if !hitCap || attempt == maxAttempts || Task.isCancelled { break }
+            print("Warning: clone generation hit the \(cloneSampling.maxTokens)-token cap "
+                + "without EOS (runaway trajectory) — retrying (\(attempt)/\(maxAttempts - 1))...")
+            // Perturb the RNG so the retry takes a different trajectory.
+            seedSamplingRNG(UInt64.random(in: 0..<UInt64(UInt32.max)))
+        }
 
         eval(allCodebooks)
         let t2 = CFAbsoluteTimeGetCurrent()
@@ -500,6 +522,7 @@ public class Qwen3TTSModel {
 
         // Autoregressive generation loop
         for iterIdx in 1..<safeMaxTokens {
+            if Task.isCancelled { break }  // E3: cooperative cancellation
             // Text side
             let textEmbed: MLXArray
             let trailingLen = trailingTextHidden.dim(1)
@@ -926,6 +949,7 @@ public class Qwen3TTSModel {
 
         // Autoregressive generation
         for iterIdx in 1..<safeMaxTokens {
+            if Task.isCancelled { break }  // E3: cooperative cancellation
             // Text side: next trailing text embed or pad (same index for all items since pre-padded)
             let textEmbed: MLXArray
             if trailingIdx < maxTrailingLen {
@@ -1645,6 +1669,11 @@ public class Qwen3TTSModel {
 
         // Autoregressive generation
         for iterIdx in 1..<safeMaxTokens {
+            // E3: cooperative cancellation at token boundaries (C13). Break (not throw)
+            // keeps the API non-throwing; callers' post-run Task.checkCancellation()
+            // surfaces the CancellationError.
+            if Task.isCancelled { break }
+
             // Text side: next trailing text embed or tts_pad
             let textEmbed: MLXArray
             let trailingLen = trailingTextHidden.dim(1)
