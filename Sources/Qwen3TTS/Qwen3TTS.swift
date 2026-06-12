@@ -1849,8 +1849,15 @@ public class Qwen3TTSModel {
         // (tonal = steady hum) followed by a region with higher variance (speech).
         // We use a sliding analysis window of 6 RMS values and check variance.
         let analysisLen = 6  // ~150ms of context for variance computation
-        let varianceThreshold: Float = 0.0002  // Low variance = tonal (steady energy)
-        let minTonalRms: Float = 0.005  // Must have some energy to be tonal (not silence)
+        // E9 (EXTERNAL-RESOLVE): the original ABSOLUTE variance threshold (2e-4) flagged
+        // steady-energy SPEECH (sustained final vowels, quiet zero-shot output) as tonal
+        // and, uncapped, ate up to ~20% of the utterance including the last word. Tonality
+        // is now judged RELATIVE to the local level (coefficient of variation — a steady
+        // machine hum has CV ≈ 0; spoken vowels vary ≥10% across 150 ms), and the total
+        // trim is capped at min(0.6 s, 15% of the clip).
+        let cvThreshold: Float = 0.08          // std/mean below this = tonal hum
+        let minTonalRms: Float = 0.005         // must have some energy (not silence)
+        let maxTrimSamples = min(Int(Double(sampleRate) * 0.6), samples.count * 15 / 100)
 
         var tonalStartWindowIdx: Int? = nil
 
@@ -1864,12 +1871,18 @@ public class Qwen3TTSModel {
                 // Skip if no energy (silence, not tonal)
                 guard mean > minTonalRms else { continue }
 
-                // Compute variance
+                // Coefficient of variation: relative steadiness, level-independent.
                 let variance = rmsValues.map { ($0 - mean) * ($0 - mean) }.reduce(0, +) / Float(rmsValues.count)
+                let cv = sqrt(variance) / mean
 
-                if variance < varianceThreshold {
-                    // This region is tonal — record it but keep scanning backward
-                    tonalStartWindowIdx = startIdx
+                if cv < cvThreshold {
+                    // Tonal candidate — but never extend the cut past the trim budget.
+                    let candidateStart = windowEnergies[startIdx].startSample
+                    if samples.count - candidateStart <= maxTrimSamples {
+                        tonalStartWindowIdx = startIdx
+                    } else if tonalStartWindowIdx != nil {
+                        break  // budget exhausted; keep what we have
+                    }
                 } else {
                     // Hit a region with variable energy (speech) — stop
                     if tonalStartWindowIdx != nil {

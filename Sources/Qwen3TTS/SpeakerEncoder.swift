@@ -289,7 +289,10 @@ public enum SpeakerMel {
         samples: [Float], nFFT: Int, hopLength: Int, window: [Float]
     ) -> MLXArray {
         let numBins = nFFT / 2 + 1
-        let padAmount = nFFT / 2
+        // PT reference (modeling_qwen3_tts.mel_spectrogram): pad (n_fft - hop)/2 = 384
+        // reflect on each side, then torch.stft(center=False). The previous n_fft/2 = 512
+        // center-style padding produced an extra frame AND a 128-sample alignment shift.
+        let padAmount = (nFFT - hopLength) / 2
         // Reflect pad
         var padded = [Float](repeating: 0, count: padAmount + samples.count + padAmount)
         for i in 0..<padAmount {
@@ -340,7 +343,7 @@ public enum SpeakerMel {
                         for bin in 1..<(nFFT / 2) {
                             let r = splitComplex.realp[bin] / 2.0
                             let im = splitComplex.imagp[bin] / 2.0
-                            magnitudes[frame * numBins + bin] = sqrt(r * r + im * im)
+                            magnitudes[frame * numBins + bin] = sqrt(r * r + im * im + 1e-9)
                         }
                         magnitudes[frame * numBins + nFFT / 2] = abs(nyquist)
                     }
@@ -356,8 +359,25 @@ public enum SpeakerMel {
     ) -> MLXArray {
         let numBins = nFFT / 2 + 1
 
-        func hzToMel(_ hz: Float) -> Float { 2595.0 * log10(1.0 + hz / 700.0) }
-        func melToHz(_ mel: Float) -> Float { 700.0 * (pow(10.0, mel / 2595.0) - 1.0) }
+        // librosa.filters.mel EXACT (htk=False → Slaney SCALE; norm='slaney' → area
+        // normalization). The PT reference uses librosa defaults; the previous HTK-scale,
+        // un-normalized filterbank shifted the log-mels by +0.3..+6 per bin and corrupted
+        // the x-vector (cosine 0.838 vs PT) — the E8 buzzy-clone root cause.
+        func hzToMel(_ hz: Float) -> Float {
+            // Slaney: linear below 1 kHz (200/3 Hz per mel), log above.
+            let fSp: Float = 200.0 / 3.0
+            let minLogHz: Float = 1000.0
+            let minLogMel: Float = minLogHz / fSp
+            let logStep: Float = log(6.4) / 27.0
+            return hz < minLogHz ? hz / fSp : minLogMel + log(hz / minLogHz) / logStep
+        }
+        func melToHz(_ mel: Float) -> Float {
+            let fSp: Float = 200.0 / 3.0
+            let minLogHz: Float = 1000.0
+            let minLogMel: Float = minLogHz / fSp
+            let logStep: Float = log(6.4) / 27.0
+            return mel < minLogMel ? mel * fSp : minLogHz * exp(logStep * (mel - minLogMel))
+        }
 
         let melMin = hzToMel(fMin)
         let melMax = hzToMel(fMax)
@@ -372,14 +392,16 @@ public enum SpeakerMel {
             let fLow = melPoints[m]
             let fCenter = melPoints[m + 1]
             let fHigh = melPoints[m + 2]
+            // Slaney area normalization: 2 / (f[m+2] - f[m]).
+            let enorm: Float = 2.0 / (fHigh - fLow)
 
             for k in 0..<numBins {
                 let freq = fftFreqs[k]
-                if freq >= fLow && freq <= fCenter && fCenter > fLow {
-                    filterbank[k * nMels + m] = (freq - fLow) / (fCenter - fLow)
-                } else if freq > fCenter && freq <= fHigh && fHigh > fCenter {
-                    filterbank[k * nMels + m] = (fHigh - freq) / (fHigh - fCenter)
-                }
+                // librosa ramp form: max(0, min(lower, upper)).
+                let lower = fCenter > fLow ? (freq - fLow) / (fCenter - fLow) : -1
+                let upper = fHigh > fCenter ? (fHigh - freq) / (fHigh - fCenter) : -1
+                let w = max(0, min(lower, upper))
+                filterbank[k * nMels + m] = w * enorm
             }
         }
 
